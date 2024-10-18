@@ -55,13 +55,11 @@ def pretty_print_messages(messages) -> None:
             name, args = f["name"], f["arguments"]
             arg_str = json.dumps(json.loads(args)).replace(":", "=")
             print(f"\033[95m{name}\033[0m({arg_str[1:-1]})")
-
-
 def run_demo_loop(
     starting_agent, context_variables=None, stream=False, debug=False
 ) -> None:
     client = Swarm()
-    print("Starting Swarm CLI 🐝")
+    print("Launching Swarm... 🐦")
 
     messages = []
     agent = starting_agent
