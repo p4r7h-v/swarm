@@ -10,7 +10,8 @@ from llama_index.core import VectorStoreIndex, SimpleDirectoryReader, StorageCon
 from llama_index.llms.openai import OpenAI as LlamaOpenAI
 from pathlib import Path
 from pydub import AudioSegment
-from pydub.playback import play
+import sounddevice as sd
+import soundfile as sf
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
@@ -21,54 +22,135 @@ from swarm.repl import run_demo_loop
 from pandasql import sqldf
 import datetime
 import streamlit as st
+from termcolor import colored
+import anthropic
+from e2b_code_interpreter import Sandbox
+from dotenv import load_dotenv
+from runwayml_tool import generate_video
 
-# Initialize OpenAI client
-openai = OpenAI(api_key=os.environ.get("OPENAI_API_KEY", "<your OpenAI API key if not set as env var>"))
+load_dotenv()
 
-swarm_client = Swarm()
+st.set_page_config(page_title="MiniSwarm", page_icon="🐞")
 
-# Set up directories
-data_dir = 'data/'
-image_dir_name = "images"
-image_dir = os.path.join(os.curdir, image_dir_name)
+@st.cache_resource
+def initialize_app():
+    # Initialize OpenAI client
+    openai = OpenAI(api_key=os.environ.get("OPENAI_API_KEY", "<your OpenAI API key if not set as env var>"))
 
-# Ensure image directory exists
-if not os.path.isdir(image_dir):
-    os.mkdir(image_dir)
+    # Initialize Swarm client
+    swarm_client = Swarm()
 
-# Check for existing index or create a new one
-print("Checking if storage already exists...")
-PERSIST_DIR = "./storage"
-if not os.path.exists(PERSIST_DIR):
-    print("Loading documents and creating the index...")
-    documents = SimpleDirectoryReader(data_dir).load_data()
-    index = VectorStoreIndex.from_documents(documents)
-    print("Storing the index for later...")
-    index.storage_context.persist(persist_dir=PERSIST_DIR)
-else:
-    print("Loading the existing index...")
-    storage_context = StorageContext.from_defaults(persist_dir=PERSIST_DIR)
-    index = load_index_from_storage(storage_context)
+    #  agent mapping
+    agent_mapping = {
+        "Triage Agent": triage_agent,
+        "Reasoning Agent": reasoning_agent,
+        "Research Agent": research_agent,
+        "File Management Agent": file_management_agent,
+        "Image Processing Agent": image_processing_agent,
+        "Codebase Agent": codebase_agent,
+        "Voice Agent": voice_agent,
+        "Data Analysis Agent": data_analysis_agent,
+        "Math Agent": math_agent,
+        "LinkedIn Agent": linkedin_agent,
+        "Claude Agent": claude_agent,
+        "Runway Agent": runway_agent
+    }
 
-# Initialize chat engine
-try:
-    llm = LlamaOpenAI(model="gpt-4o")
-    chat_engine = index.as_chat_engine(
-        llm=llm,
-        chat_mode="condense_plus_context",
-        memory_buffer_size=100000,
-        system_prompt=(
-            "You are a helpful AI assistant. You are here to assist with any questions "
-            "you may have about the documents. You end each response with a numbered "
-            "list of follow-up actions, predicting what the user will ask next. You are "
-            "not a search engine, and you do not have access to the internet."
+    # Set up directories
+    data_dir = 'data/'
+    image_dir_name = "images"
+    image_dir = os.path.join(os.curdir, image_dir_name)
+
+    # Ensure image directory exists
+    if not os.path.isdir(image_dir):
+        os.mkdir(image_dir)
+
+    # Check for existing index or create a new one
+    with st.spinner("Checking if storage already exists..."):
+        PERSIST_DIR = "./storage"
+        if not os.path.exists(PERSIST_DIR):
+            with st.spinner("Loading documents and creating the index..."):
+                documents = SimpleDirectoryReader(data_dir).load_data()
+                index = VectorStoreIndex.from_documents(documents)
+            with st.spinner("Storing the index for later..."):
+                index.storage_context.persist(persist_dir=PERSIST_DIR)
+        else:
+            with st.spinner("Loading the existing index..."):
+                storage_context = StorageContext.from_defaults(persist_dir=PERSIST_DIR)
+                index = load_index_from_storage(storage_context)
+
+    # Initialize chat engine
+    try:
+        llm = LlamaOpenAI(model="gpt-4o")
+        chat_engine = index.as_chat_engine(
+            llm=llm,
+            chat_mode="condense_plus_context",
+            memory_buffer_size=100000,
+            system_prompt=(
+                "You are a helpful AI assistant. You are here to assist with any questions "
+                "you may have about the documents. You end each response with a numbered "
+                "list of follow-up actions, predicting what the user will ask next. You are "
+                "not a search engine, and you do not have access to the internet."
+            )
         )
-    )
-    print("Chat engine initialized successfully.")
-except Exception as e:
-    print(f"Error initializing chat engine: {e}")
+        print("Chat engine initialized successfully.")
+        return openai, swarm_client, chat_engine, agent_mapping
+    except Exception as e:
+        print(f"Error initializing chat engine: {e}")
+        return None
 
-# Define tools (functions)
+
+def reasoning(query: str, model: str) -> str:
+    """Uses reasoning to solve a problem based on the specified model.
+
+    Choose 'o1-preview' for tasks requiring in-depth reasoning, complex knowledge tasks, and creative coding prompts.
+    Choose 'o1-mini' for tasks demanding fast processing, advanced mathematical solutions, and competitive coding scenarios.
+    """
+    print(colored("Reasoning query: ", "blue") + query)
+    if model not in ["o1-preview", "o1-mini"]:
+        print(colored("Invalid model name. Please choose either 'o1-preview' or 'o1-mini'.", "red"))
+        return "Invalid model name. Please choose either 'o1-preview' or 'o1-mini'."
+    
+    response = openai.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "user", "content": query}
+        ]
+    )
+    print(colored("Reasoning response: ", "green") + response.choices[0].message.content)
+    return response.choices[0].message.content
+
+def claude(prompt: str) -> str:
+    """Uses Claude to get a response to a prompt."""
+    try:
+        anthropic_api_key = os.environ.get("ANTHROPIC_API_KEY")
+        if not anthropic_api_key:
+            return "Error: ANTHROPIC_API_KEY not found in environment variables."
+        
+        client = anthropic.Anthropic(api_key=anthropic_api_key)
+        
+        message = client.messages.create(
+            model="claude-3-sonnet-20240229",
+            max_tokens=1000,
+            temperature=0,
+            system="You are a helpful AI assistant.",
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": prompt
+                        }
+                    ]
+                }
+            ]
+        )
+        return message.content
+    except Exception as e:
+        return f"An error occurred while using Claude: {str(e)}"
+
+
 def ragbot(query: str) -> tuple:
     """Uses RAG to get possible results for a query based on the documents."""
     try:
@@ -273,9 +355,21 @@ def get_file_metadata(file_path: str) -> dict:
         }
     except Exception as e:
         return {"error": str(e)}
-
 def generate_image(prompt: str, image_filepath: str, model: str = "dall-e-3", n: int = 1, size: str = "1024x1024", response_format: str = "url", quality: str = "standard") -> str:
-    """Generates an image based on a text prompt using DALL-E. Size must be one of the following: 1024x1024, 1792x1024, or 1024x1792. Quality must be one of the following: standard, hd."""
+    """Generates an image based on a text prompt using DALL-E.
+
+    Parameters:
+    - prompt (str): The text prompt to generate the image.
+    - image_filepath (str): The file path where the generated image will be saved. Example: 'images/generated_image.png'
+    - model (str): The model to use for image generation. Default is 'dall-e-3'.
+    - n (int): The number of images to generate. Default is 1.
+    - size (str): The size of the generated image. Must be one of the following: 1024x1024, 1792x1024, or 1024x1792.
+    - response_format (str): The format of the response. Default is 'url'.
+    - quality (str): The quality of the generated image. Must be one of the following: standard, hd.
+
+    Returns:
+    - str: A message indicating the result of the image generation.
+    """
     try:
         generation_response = openai.images.generate(
             model=model,
@@ -287,17 +381,16 @@ def generate_image(prompt: str, image_filepath: str, model: str = "dall-e-3", n:
         )
         generated_image_url = generation_response.data[0].url
         generated_image = requests.get(generated_image_url).content
-        with open("images/" + image_filepath, "wb") as image_file:
+        with open(image_filepath, "wb") as image_file:
             image_file.write(generated_image)
-        return "images/" + image_filepath
+        return f"Image generated and saved as {image_filepath}."
     except Exception as e:
         return f"Failed to generate image: {e}"
 
 def display_image(image_path: str):
     """Displays an image from the given file path."""
     try:
-        image = Image.open(image_path)
-        image.show()
+        st.image(image_path)
         return f"Image displayed."
     except Exception as e:
         return f"Failed to display image: {e}"
@@ -337,10 +430,14 @@ def create_folder(folder_path: str) -> str:
     except Exception as e:
         return f"Failed to create folder {folder_path}: {e}"
     
-import pygame
 
-def synthesize_speech(text: str, voice: str = "alloy", output_file: str = "output.mp3") -> str:
-    """Synthesizes speech from text using OpenAI's TTS model and plays the audio."""
+
+
+def synthesize_speech(text: str, voice: str = "alloy", output_file: str = "output.wav") -> str:
+    """Synthesizes speech from text using OpenAI's TTS model and plays the audio.
+
+    Experiment with different voices (alloy, echo, fable, onyx, nova, and shimmer) to find one that matches your desired tone and audience. The current voices are optimized for English.
+    """
     try:
         # Initialize the OpenAI client
         client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
@@ -359,19 +456,16 @@ def synthesize_speech(text: str, voice: str = "alloy", output_file: str = "outpu
         with open(speech_file_path, "wb") as file:
             file.write(response.content)
         
-        # Initialize pygame mixer
-        pygame.mixer.init()
+        # Read the audio file
+        data, samplerate = sf.read(speech_file_path)
         
-        # Play the audio file
-        pygame.mixer.music.load(speech_file_path)
-        pygame.mixer.music.play()
+        # Play the audio
+        sd.play(data, samplerate)
+        sd.wait()  # Wait until the audio is finished playing
         
-        while pygame.mixer.music.get_busy():
-            pygame.time.Clock().tick(10)
-        
-        return f"Speech synthesized and saved as {speech_file_path}."
+        return f"Speech synthesized and played. File saved as {speech_file_path}."
     except Exception as e:
-        return f"Failed to synthesize speech: {e}"
+        return f"Failed to synthesize or play speech: {e}"
     
 def generate_streaming_voice(text: str) -> str:
     """Generates and streams a voice using ElevenLabs."""
@@ -388,8 +482,52 @@ def generate_streaming_voice(text: str) -> str:
         return "Voice generated and streamed successfully."
     except Exception as e:
         return f"Failed to generate and stream voice: {e}"
-
 # Define functions for Data Analysis Agent
+def execute_code_in_sandbox(code: str) -> dict:
+    """
+    Executes the provided code in the sandbox and returns the response.
+    
+    Args:
+        code (str): A string containing the code to be executed.
+        
+    Returns:
+        dict: A dictionary containing the execution results.
+    """
+    try:
+        sandbox = Sandbox()
+        execution = sandbox.run_code(code)
+        
+        results = []
+        for result in execution.results:
+            if result.png:
+                # Save the png to a file. The png is in base64 format.
+                timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S%f")
+                file_name = f'images/sandbox_result_{timestamp}.png'
+                with open(file_name, 'wb') as f:
+                    f.write(base64.b64decode(result.png))
+                st.image(file_name)
+                results.append(file_name)
+        
+        if results:
+            return {"message": f"Charts saved as {', '.join(results)}"}
+        else:
+            return {"message": "No charts generated."}
+    except Exception as e:
+        return {"error": str(e)}
+    
+def display_latex_expression(expression: str):
+    """
+    Displays a LaTeX expression using Streamlit's st.latex function.
+
+    Args:
+        expression (str): The LaTeX expression to display.
+    """
+    try:
+        st.latex(expression)
+        return "LaTeX expression displayed successfully."
+    except Exception as e:
+        return f"Failed to display LaTeX expression: {e}"
+
 def clean_data(data: str) -> dict:
     """Cleans the provided data by removing duplicates."""
     data_io = StringIO(data)
@@ -402,80 +540,6 @@ def stat_analysis(data: str) -> dict:
     data_io = StringIO(data)
     df = pd.read_csv(data_io, sep=",")
     return {"stats": df.describe().to_dict()}
-
-def plot_line_chart(data: str) -> None:
-    """Creates a line chart from the provided data."""
-    data_io = StringIO(data)
-    df = pd.read_csv(data_io, sep=",")
-    
-    x = df.iloc[:, 0]
-    y = df.iloc[:, 1]
-    
-    coefficients = np.polyfit(x, y, 1)
-    polynomial = np.poly1d(coefficients)
-    y_fit = polynomial(x)
-    
-    plt.figure(figsize=(10, 6))
-    plt.plot(x, y, 'o', label='Data Points')
-    plt.plot(x, y_fit, '-', label='Best Fit Line')
-    plt.title('Line Chart with Best Fit Line')
-    plt.xlabel(df.columns[0])
-    plt.ylabel(df.columns[1])
-    plt.legend()
-    plt.grid(True)
-    plt.show()
-
-def plot_bar_chart(data: str) -> None:
-    """Creates a bar chart from the provided data."""
-    data_io = StringIO(data)
-    df = pd.read_csv(data_io, sep=",")
-    
-    x = df.iloc[:, 0]
-    y = df.iloc[:, 1]
-    
-    plt.figure(figsize=(10, 6)) 
-    plt.bar(x, y)
-    plt.title('Bar Chart')
-    plt.xlabel(df.columns[0])
-    plt.ylabel(df.columns[1])
-    plt.grid(True)
-    plt.show()
-
-def plot_histogram(data: str) -> None:  
-    """Creates a histogram from the provided data. Pass in a string of comma separated values for x."""
-    data_io = StringIO(data)
-    df = pd.read_csv(data_io, sep=",")
-    
-    plt.figure(figsize=(10, 6))
-    plt.hist(df.iloc[:, 0], bins=10)
-    plt.title('Histogram')
-    plt.xlabel(df.columns[0])   
-    plt.ylabel('Frequency')
-    plt.grid(True)
-    plt.show()
-
-def plot_scatter_plot(data: str) -> None:
-    """Creates a scatter plot from the provided data."""
-    data_io = StringIO(data)
-    df = pd.read_csv(data_io, sep=",")  
-    
-    plt.figure(figsize=(10, 6))
-    plt.scatter(df.iloc[:, 0], df.iloc[:, 1])
-    plt.title('Scatter Plot')
-    plt.xlabel(df.columns[0])
-    plt.ylabel(df.columns[1])
-    plt.grid(True)
-    plt.show()
-
-def plot_pie_chart(data: str) -> None:
-    """Creates a pie chart from the provided data."""
-    data_io = StringIO(data)
-    df = pd.read_csv(data_io, sep=",")
-    
-    plt.figure(figsize=(10, 6))
-    plt.pie(df.iloc[:, 1], labels=df.iloc[:, 0], autopct='%1.1f%%')
-    plt.title('Pie Chart')
-    plt.show()      
 
 
 def add_numbers(a: float, b: float) -> float:
@@ -501,10 +565,11 @@ def linkedin_search(prompt: str):
     
     Column names: First Name, Last Name, URL, Email Address, Company, Position, Connected On
     
-    Examples of SQL queries you can use:
-    - `SELECT * FROM df WHERE Company = 'OpenAI';`
+    Here are some examples of SQL-like queries you can use:
+    - `SELECT * FROM df WHERE Company LIKE '%OpenAI%';`
     - `SELECT `First Name`, `Last Name` FROM df WHERE `Connected On` > '2023-01-01';`
     - `SELECT Company, COUNT(*) AS ContactCount FROM df GROUP BY Company ORDER BY ContactCount DESC;`
+    - `SELECT * FROM df WHERE Position LIKE '%Software Engineer%';`
     
     Use 'df' as the table name and enclose column names with spaces in backticks (`).
     """
@@ -517,7 +582,6 @@ def linkedin_search(prompt: str):
         return f"An error occurred: {e}"
     
     try:
-        print("Prompt:", prompt)
         result = sqldf(prompt, {'df': df})
         if result.empty:
             return "No results found."
@@ -529,6 +593,10 @@ def linkedin_search(prompt: str):
 def transfer_back_to_triage():
     """Transfers back to the Triage Agent."""
     return triage_agent
+
+def transfer_to_reasoning():
+    """Transfers to the Reasoning Agent."""
+    return reasoning_agent
 
 def transfer_to_research():
     """Transfers to the Research Agent."""
@@ -562,13 +630,24 @@ def transfer_to_linkedin():
     """Transfers to the LinkedIn Agent."""
     return linkedin_agent
 
+def transfer_to_claude():
+    """Transfers to the Claude Agent."""
+    return claude_agent
+
+def transfer_to_runway():
+    """Transfers to the Runway Agent."""
+    return runway_agent
+
+
+
 # Define agents for Fenix Research
 triage_agent = Agent(
     name="Triage Agent",
     instructions=(
-        f"You are the Triage Agent for Fenix Research. You are CLI based, so don't use markdown for chat. The Fenix Research program is capable of handling various tasks through specialized agents. Determine which agent is best suited to handle the user's request, and transfer the conversation to that agent. The agents available are: Research Agent for web searches and document retrieval, File Management Agent for managing files and directories, Image Processing Agent for image generation and processing, Codebase Agent for managing and analyzing the codebase, Voice Agent for text-to-speech synthesis, Data Analysis Agent for data cleaning, statistical analysis, and line chart generation, Math Agent for basic arithmetic operations, LinkedIn Agent for executing SQL queries on LinkedIn data stored in a CSV file. Today's date is {datetime.date.today()}."
+        f"You are the Triage Agent for MiniSwarm. You are a Streamlit based chatbot, so use markdown for chat. The MiniSwarm program is capable of handling various tasks through specialized agents. Determine which agent is best suited to handle the user's request, and transfer the conversation to that agent. The agents available are: Reasoning Agent for logical reasoning and problem solving, Research Agent for web searches and document retrieval, File Management Agent for managing files and directories, Image Processing Agent for image generation and processing, Codebase Agent for managing and analyzing the codebase, Voice Agent for text-to-speech synthesis, Data Analysis Agent for data cleaning, statistical analysis, and line chart generation, Math Agent for basic arithmetic operations, LinkedIn Agent for executing SQL queries on LinkedIn data stored in a CSV file, Claude Agent for writing and editing, and Runway Agent for video generation. Today's date is {datetime.date.today()}. End your responses with a list of numbered hotkeys for intelligent suggestions."
     ),
     functions=[
+        transfer_to_reasoning,
         transfer_to_research,
         transfer_to_file_management,
         transfer_to_image_processing,
@@ -576,8 +655,18 @@ triage_agent = Agent(
         transfer_to_voice,
         transfer_to_data_analysis,
         transfer_to_math,
-        transfer_to_linkedin
+        transfer_to_linkedin,
+        transfer_to_claude,
+        transfer_to_runway
     ]
+)
+
+reasoning_agent = Agent(
+    name="Reasoning Agent",
+    instructions=(
+        "You are the Reasoning Agent. Always use the reasoning function before responding. Use the sandbox if you need to execute code."
+    ),
+    functions=[reasoning, execute_code_in_sandbox, transfer_back_to_triage, transfer_to_data_analysis, transfer_to_research]
 )
 
 research_agent = Agent(
@@ -585,7 +674,7 @@ research_agent = Agent(
     instructions=(
         f"You are the Research Agent. Handle research queries by performing web searches, scraping websites, and retrieving answers from documents. Today's date is {datetime.date.today()}."
     ),
-    functions=[web_search, scrape_website, ragbot, transfer_back_to_triage]
+    functions=[web_search, scrape_website, ragbot, transfer_back_to_triage, transfer_to_data_analysis, transfer_to_reasoning]
 )
 
 file_management_agent = Agent(
@@ -594,15 +683,15 @@ file_management_agent = Agent(
         "You are the File Management Agent. Manage files and directories on the system."
     ),
     functions=[
-        create_file, read_file, delete_file, rename_file, copy_file, move_file,
-        append_to_file, check_file_existence, get_file_metadata, transfer_back_to_triage
+        list_files,create_file, read_file, delete_file, rename_file, copy_file, move_file,
+        append_to_file, check_file_existence, get_file_metadata, transfer_back_to_triage, transfer_to_reasoning, transfer_to_research, transfer_to_image_processing, transfer_to_codebase,
     ]
 )
 
 image_processing_agent = Agent(
     name="Image Processing Agent",
     instructions=(
-        "You are the Image Processing Agent. Handle image generation and processing requests."
+        "You are the Image Processing Agent. Handle image generation and processing requests. Images are saved in the images/ directory. If you generate an image return the path to the image in the response."
     ),
     functions=[generate_image, display_image, analyze_image, transfer_back_to_triage]
 )
@@ -610,15 +699,15 @@ image_processing_agent = Agent(
 codebase_agent = Agent(
     name="Codebase Agent",
     instructions=(
-        "You are the Codebase Agent. Manage and analyze the codebase."
+        "You are the Codebase Agent. Manage and analyze the codebase. You can read files in the current directory and any subdirectories."
     ),
-    functions=[read_file, get_file_metadata, transfer_back_to_triage]
+    functions=[read_file, list_files, get_file_metadata, transfer_back_to_triage, transfer_to_reasoning]
 )
 
 voice_agent = Agent(
     name="Voice Agent",
     instructions=(
-        "You are the Voice Agent. Use synthesis to convert text to speech."
+        "You are the Voice Agent. Use synthesis to convert text to speech. Use synthesis if you want to use OpenAI's TTS model. Use streaming synthesis if you want to use ElevenLabs."
     ),
     functions=[synthesize_speech, generate_streaming_voice, transfer_back_to_triage]
 )
@@ -626,9 +715,9 @@ voice_agent = Agent(
 data_analysis_agent = Agent(
     name="Data Analysis Agent",
     instructions=(
-        "You are the Data Analysis Agent. Perform data analysis tasks including cleaning data, conducting statistical analysis, and generating line charts."
+        "You are the Data Analysis Agent. Perform data analysis tasks including executing code in the sandbox, cleaning data, conducting statistical analysis, and generating line charts. Images are saved in the images/ directory. If you generate an image return the path to the image in the response."
     ),
-    functions=[clean_data, stat_analysis, plot_line_chart, plot_bar_chart, plot_histogram, plot_scatter_plot, plot_pie_chart, transfer_back_to_triage]
+    functions=[execute_code_in_sandbox, clean_data, stat_analysis, transfer_back_to_triage, transfer_to_reasoning, transfer_to_research, display_latex_expression]
 )
 
 # Define Math Agent
@@ -642,7 +731,7 @@ math_agent = Agent(
         subtract_numbers,
         multiply_numbers,
         divide_numbers,
-        transfer_back_to_triage
+        transfer_back_to_triage, display_latex_expression
     ]
 )
 
@@ -654,10 +743,38 @@ linkedin_agent = Agent(
     functions=[linkedin_search, transfer_back_to_triage]
 )
 
+claude_agent = Agent(
+    name="Claude Agent",
+    instructions=(
+        "You are the Claude Agent. Use Claude if you want a second opinion or a writing specialist."
+    ),
+    functions=[claude, transfer_back_to_triage]
+)
+
+runway_agent = Agent(
+    name="Runway Agent",
+    instructions=(
+        "You are the Runway Agent. Use Runway if you want to generate videos."
+    ),
+    functions=[generate_image,generate_video, transfer_back_to_triage]
+)
+
 # Define avatar mapping for agents
 agent_avatars = {
     "user": "user.png",
-    "assistant": "neon_phoenix_icon_variant3.png"
+    "assistant": "neon_phoenix_icon_variant3.png",
+    "Triage Agent": "firefly.png",
+    "Reasoning Agent": "reasoning.png",
+    "Research Agent": "research.png",
+    "File Management Agent": "file_management.png",
+    "Image Processing Agent": "pixel_papillon.png",
+    "Codebase Agent": "👨‍💻",
+    "Voice Agent": "🎤",
+    "Data Analysis Agent": "📊",
+    "Math Agent": "➕",
+    "LinkedIn Agent": "🔗",
+    "Claude Agent": "📝",
+    "Runway Agent": "🎥"
 }
 
 def preprocess(chunk):
@@ -667,6 +784,7 @@ def preprocess(chunk):
     if "sender" in chunk and chunk["sender"]:
         sender = chunk["sender"]
         st.session_state["agent"] = agent_mapping[sender]
+
     if "content" in chunk and chunk["content"]:
         content_chunk = chunk["content"]
         content += content_chunk
@@ -678,7 +796,6 @@ def preprocess(chunk):
             if name and name != "":
                 content += f"`{name}()`\n\n"  # Use markdown for code formatting
 
-
     if "delim" in chunk and chunk["delim"] == "end" and content:
         content += "\n"  # End of response message
 
@@ -688,8 +805,12 @@ def preprocess(chunk):
 def process_stream(stream):
     assistant_content = ""
     image_path = None
+    current_sender = None
+
     for chunk in stream:
         content, sender = preprocess(chunk)
+        if sender:
+            current_sender = sender
         if sender and content:
             assistant_content += f"**{sender}:** {content}\n"
         elif content:
@@ -699,66 +820,88 @@ def process_stream(stream):
         if "Image generated and saved to " in content:
             image_path = content.split("Image generated and saved to ")[-1].strip(".")
         
-        yield assistant_content, image_path
+        yield assistant_content, image_path, current_sender
 
     # After processing all chunks, append the assistant's message to session state
     if assistant_content:
-        message = {"role": "assistant", "content": assistant_content.strip()}
+        message = {
+            "role": "assistant", 
+            "content": assistant_content.strip(),
+            "sender": current_sender  # Include the sender information
+        }
         if image_path:
             message["image"] = image_path
         st.session_state["messages"].append(message)
 
-#  agent mapping
-agent_mapping = {
-    "Triage Agent": triage_agent,
-    "Research Agent": research_agent,
-    "File Management Agent": file_management_agent,
-    "Image Processing Agent": image_processing_agent,
-    "Codebase Agent": codebase_agent,
-    "Voice Agent": voice_agent,
-    "Data Analysis Agent": data_analysis_agent,
-    "Math Agent": math_agent,
-    "LinkedIn Agent": linkedin_agent
-}
+def display_agent_sidebar(agent_mapping):
+    st.sidebar.title("Available Agents")
+    selected_agent = st.sidebar.radio(
+        "Select an agent:",
+        list(agent_mapping.keys()),
+        index=list(agent_mapping.keys()).index(st.session_state.get("agent", "Triage Agent").name)
+    )
+    if selected_agent != st.session_state.get("agent", "Triage Agent").name:
+        st.session_state["agent"] = agent_mapping[selected_agent]
+        st.rerun()
 
+#Initialize the app
+openai, swarm_client, chat_engine, agent_mapping = initialize_app()
 
 # Initialize session state to store messages and the agent
 if "messages" not in st.session_state:
-    st.session_state["messages"] = []
+    st.session_state["messages"] = [{
+        "role": "assistant",
+        "content": "**Triage Agent:** Welcome to MiniSwarm, your advanced multi-agent system.",
+        "sender": "Triage Agent"
+    }]
 if "agent" not in st.session_state:
     st.session_state["agent"] = agent_mapping["Triage Agent"]
 
+display_agent_sidebar(agent_mapping)
 
 # Title of the chat app
-st.title("MiniSwarm.AI")
+st.title("MiniSwarm")
 
 # Display previous chat messages
 for message in st.session_state["messages"]:
-    role = message.get("role", "assistant")
-    avatar = agent_avatars.get(role, "🤖")  # Default to 🤖 if role not found
-    # Use st.chat_message without avatar if it's an emoji
-    if len(avatar) == 1 or avatar.startswith('🧑‍'):  # Check if it's an emoji
-        with st.chat_message(role):
-            st.markdown(message["content"])
-            if "image" in message:
-                st.image(message["image"])
+    role = message["role"]
+    sender = message.get("sender", "Unknown")  # Default to "Unknown" if sender is not set
+    
+    if role == "user":
+        avatar = agent_avatars.get("user", "🧑‍💻")
+    elif role == "assistant":
+        avatar = agent_avatars.get(sender, "🤖")  # Use the sender to get the correct avatar
     else:
-        with st.chat_message(role, avatar=avatar):
-            st.markdown(message["content"])
-            if "image" in message:
-                st.image(message["image"])
+        avatar = "🤖"  # Default avatar for unknown roles
+    with st.chat_message(role, avatar=avatar):
+        st.markdown(message["content"])
+        # check if there are any png or jpg images in the message content
+        for ext in ["png", "jpg"]:
+            if f".{ext}" in message["content"]:
+                try:
+                    if f"images/" in message["content"]:
+                        image_path = message["content"].split(f"images/")[1].split(f".{ext}")[0] + f".{ext}"
+                        st.image("images/" + image_path)
+                    else:
+                        image_path = message["content"].split(f".{ext}")[0] + f".{ext}"
+                        st.image(image_path)
+                except st.runtime.media_file_storage.MediaFileStorageError as e:
+                    st.error(f"Error displaying image: {e}")
 
 # User input through Streamlit chat input
 user_input = st.chat_input("Type your message")
 
 if user_input:
     # Append user's message to session state and display it
-    st.session_state["messages"].append({"role": "user", "content": user_input})
+    st.session_state["messages"].append({
+        "role": "user", 
+        "content": user_input,
+        "sender": "User"  # Add sender information for user messages
+    })
     
     # Display user message in chat
     with st.chat_message("user", avatar=agent_avatars["user"]):
         st.markdown(user_input)
-
     # Send user input to Swarm agent for processing
     response = swarm_client.run(
         agent=st.session_state["agent"],
@@ -767,9 +910,24 @@ if user_input:
         stream=True,  # Optional: you can enable streaming responses
         debug=False
     )
-
     # Display Swarm's response in chat
-    with st.chat_message("assistant", avatar=agent_avatars["assistant"]):
+    with st.chat_message("assistant", avatar=agent_avatars[st.session_state["agent"].name]):
         message_placeholder = st.empty()
-        for content, _ in process_stream(response):
-            message_placeholder.markdown(content)
+        for content, image_path, sender in process_stream(response):
+            message_placeholder.markdown(f"{content}")
+            if image_path and any(ext in image_path for ext in [".png", ".jpg", ".jpeg"]):
+                try:
+                    st.image(image_path)
+                except st.runtime.media_file_storage.MediaFileStorageError as e:
+                    st.error(f"Error displaying image: {e}")
+
+    # Display chat history in sidebar as JSON
+    with st.sidebar:
+        st.header("Chat History")
+        chat_history_json = st.session_state["messages"]
+        st.json(chat_history_json)
+
+
+
+
+
