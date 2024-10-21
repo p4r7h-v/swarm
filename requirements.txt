@@ -18,7 +18,6 @@ soundfile
 seaborn
 pynput
 pydub
-playsound
 simpleaudio
 elevenlabs
 pyperclip
@@ -30,3 +29,4 @@ pygame
 anthropic
 e2b-code-interpreter
 azure-storage-blob
+opencv-python
