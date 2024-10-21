@@ -27,6 +27,9 @@ import anthropic
 from e2b_code_interpreter import Sandbox
 from dotenv import load_dotenv
 from runwayml_tool import generate_video
+import replicate
+from PIL import Image
+from io import BytesIO
 
 load_dotenv()
 
@@ -355,7 +358,7 @@ def get_file_metadata(file_path: str) -> dict:
         }
     except Exception as e:
         return {"error": str(e)}
-def generate_image(prompt: str, image_filepath: str, model: str = "dall-e-3", n: int = 1, size: str = "1024x1024", response_format: str = "url", quality: str = "standard") -> str:
+def generate_image_dalle(prompt: str, image_filepath: str, model: str = "dall-e-3", n: int = 1, size: str = "1024x1024", response_format: str = "url", quality: str = "standard") -> str:
     """Generates an image based on a text prompt using DALL-E.
 
     Parameters:
@@ -394,6 +397,7 @@ def display_image(image_path: str):
         return f"Image displayed."
     except Exception as e:
         return f"Failed to display image: {e}"
+    
 
 def analyze_image(image_path: str, prompt: str, max_tokens: int = 300) -> str:
     """Analyzes a local image using GPT-4 with vision capabilities."""
@@ -429,9 +433,6 @@ def create_folder(folder_path: str) -> str:
         return f"Folder {folder_path} created successfully."
     except Exception as e:
         return f"Failed to create folder {folder_path}: {e}"
-    
-
-
 
 def synthesize_speech(text: str, voice: str = "alloy", output_file: str = "output.wav") -> str:
     """Synthesizes speech from text using OpenAI's TTS model and plays the audio.
@@ -589,6 +590,16 @@ def linkedin_search(prompt: str):
     except Exception as e:
         return f"Error executing query: {e}"
     
+# Function that extracts the last frame from a video and saves it as an image
+def extract_last_frame(video_path: str, image_filepath: str) -> str:
+    """Extracts the last frame from a video and saves it as an image."""
+    import cv2
+    cap = cv2.VideoCapture(video_path)
+    ret, frame = cap.read()
+    cap.release()
+    cv2.imwrite(image_filepath, frame)
+    return f"Last frame extracted and saved as {image_filepath}."
+
 # Define transfer functions
 def transfer_back_to_triage():
     """Transfers back to the Triage Agent."""
@@ -693,7 +704,7 @@ image_processing_agent = Agent(
     instructions=(
         "You are the Image Processing Agent. Handle image generation and processing requests. Images are saved in the images/ directory. If you generate an image return the path to the image in the response."
     ),
-    functions=[generate_image, display_image, analyze_image, transfer_back_to_triage]
+    functions=[display_image, analyze_image, generate_image_dalle, transfer_back_to_triage]
 )
 
 codebase_agent = Agent(
@@ -754,9 +765,9 @@ claude_agent = Agent(
 runway_agent = Agent(
     name="Runway Agent",
     instructions=(
-        "You are the Runway Agent. Use Runway if you want to generate videos."
+        "You are the Runway Agent. Use Runway if you want to generate 10 second videos. If you want to extend the video, extract the last frame from the original video and save it as an image using the 'extract_last_frame' function. Then use the 'generate_video' function to generate a new video from the image."
     ),
-    functions=[generate_image,generate_video, transfer_back_to_triage]
+    functions=[generate_image_dalle, generate_video, extract_last_frame, transfer_back_to_triage]
 )
 
 # Define avatar mapping for agents
@@ -926,6 +937,7 @@ if user_input:
         st.header("Chat History")
         chat_history_json = st.session_state["messages"]
         st.json(chat_history_json)
+
 
 
 
